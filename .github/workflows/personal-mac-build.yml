@@ -1,0 +1,135 @@
+name: Personal Qwen macOS arm64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-qwen-arm64
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: jackmarin204-web/natively-cluely-ai-assistant
+          ref: ee905732c0d554a941396131c3df04e7b83ec729
+          submodules: false
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Confirm source and architecture
+        run: |
+          test "$(uname -m)" = arm64
+          git rev-parse HEAD
+          df -h .
+      - name: Install dependencies in cloud
+        run: npm ci
+      - name: Build renderer
+        run: npm run build
+      - name: Build public core
+        run: npm run build:electron:core-smoke
+      - name: Core smoke tests
+        run: npm run test:core-smoke
+      - name: Qwen provider tests
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          function walk(dir) {
+            return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+              const p = path.join(dir, e.name);
+              return e.isDirectory() ? walk(p) : /Qwen.*\.test\.mjs$/i.test(e.name) ? [p] : [];
+            });
+          }
+          const tests = walk('electron/audio');
+          if (!tests.length) throw new Error('No Qwen tests found');
+          const result = spawnSync(process.execPath, ['--test', ...tests], { stdio: 'inherit' });
+          process.exit(result.status ?? 1);
+          JS
+      - name: Build native audio and prepare runtime dependencies
+        run: |
+          npm run build:native
+          node scripts/ensure-sharp-mac-deps.js
+          node scripts/ensure-napi-canvas-mac-deps.js
+          node scripts/ensure-node-llama-cpp-mac-deps.js
+          node scripts/ensure-sqlite-vec.js
+          npm run verify:packaged-local-assets
+      - name: Package personal app without publishing
+        run: node scripts/package-app.js --dir --mac --arm64 --publish never
+      - name: Verify package and startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find release -maxdepth 2 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          codesign --verify --deep --strict "$APP"
+          node scripts/verify-packaged-local-assets.mjs --app "$APP" --platform darwin
+          export PERSONAL_APP="$APP"
+          python3 <<'PY'
+          import os, pathlib, plistlib, subprocess, time
+          app = pathlib.Path(os.environ['PERSONAL_APP']).resolve()
+          with open(app / 'Contents/Info.plist', 'rb') as f:
+              executable = plistlib.load(f)['CFBundleExecutable']
+          log_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'personal-app-startup.log'
+          with open(log_path, 'w') as log:
+              process = subprocess.Popen([str(app / 'Contents/MacOS' / executable), '--disable-gpu'], stdout=log, stderr=subprocess.STDOUT)
+              try:
+                  time.sleep(20)
+                  if process.poll() is not None:
+                      raise RuntimeError(f'App exited during startup: {process.returncode}')
+              finally:
+                  if process.poll() is None:
+                      process.terminate()
+                      try:
+                          process.wait(timeout=10)
+                      except subprocess.TimeoutExpired:
+                          process.kill()
+          print(log_path.read_text()[-16000:])
+          print('Startup smoke passed; real audio/API testing still required.')
+          PY
+      - name: Compress app and report size
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find release -maxdepth 2 -type d -name '*.app' -print -quit)"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" natively-qwen-arm64.zip
+          shasum -a 256 natively-qwen-arm64.zip > natively-qwen-arm64.zip.sha256
+          {
+            echo '### Personal Qwen build'
+            echo 'Source: ee905732c0d554a941396131c3df04e7b83ec729'
+            du -h natively-qwen-arm64.zip
+            du -sh "$APP"
+            cat natively-qwen-arm64.zip.sha256
+            echo 'Public core build: premium modules and calendar credentials are absent.'
+            echo 'Not notarized. Real microphone/system audio and Qwen API remain untested.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: natively-qwen-arm64
+          path: |
+            natively-qwen-arm64.zip
+            natively-qwen-arm64.zip.sha256
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload startup log if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal-startup-log
+          path: ${{ runner.temp }}/personal-app-startup.log
+          retention-days: 1
+          if-no-files-found: ignore
