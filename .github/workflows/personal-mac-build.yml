@@ -28,7 +28,7 @@ jobs:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - name: Confirm source and architecture
         run: |
           test "$(uname -m)" = arm64
@@ -61,7 +61,7 @@ jobs:
           JS
       - name: Build native audio and prepare runtime dependencies
         run: |
-          npm run build:native
+          NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm run build:native
           node scripts/ensure-sharp-mac-deps.js
           node scripts/ensure-napi-canvas-mac-deps.js
           node scripts/ensure-node-llama-cpp-mac-deps.js
